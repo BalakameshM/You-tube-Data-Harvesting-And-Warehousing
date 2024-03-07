@@ -248,31 +248,18 @@ def show_data_harvesting():
     api_key = "AIzaSyCtz3sg-iSTRWoVWfAA-antD3ADb5i51DY"
     channel_id = st.text_input("Enter YouTube channel Id:")
     global inserted_id
-    if "inserted_id" not in st.session_state:
-        st.session_state.inserted_id = None
-    if "fetch_button_clicked" not in st.session_state:
-        st.session_state.fetch_button_clicked = False
     if api_key and channel_id:
-        fetch_button_clicked = st.button("Fetch and Insert Data to MongoDB")
-        if fetch_button_clicked:
+        if st.button("Fetch and Insert Data to MongoDB"):
             with st.spinner("Fetching and inserting data to MongoDB..."):
                 inserted_id = insert_data_in_mongo_db(api_key, channel_id)
                 if inserted_id is not None:
-                    st.session_state.inserted_id = inserted_id
+                    data_list = retrieve_data_from_mongo_db(inserted_id)
                     st.success("Data Inserted To MongoDB successfully!")
-                    st.session_state.fetch_button_clicked = True
+                    st.title("Inserted Data to MongoDB")
+                    st.write("Showing data from MongoDB collection:")
+                    st.write(data_list)
                 else:
                     st.error("Channel data with the given id is already there!")
-                    st.session_state.fetch_button_clicked = False
-                    st.session_state.inserted_id = None
-        if st.session_state.fetch_button_clicked and st.button("Migrate to MySQL"):
-            with st.spinner("Migrating data to MySQL..."):
-                data_list = retrieve_data_from_mongo_db(st.session_state.inserted_id)
-                insert_data_into_phpmyadmin(data_list)
-                st.success("Data inserted into MySQL successfully!")
-                st.title("Inserted Data from MongoDB")
-                st.write("Showing data from MongoDB collection:")
-                st.write(data_list)
                     
 def main():
 
@@ -282,27 +269,87 @@ def main():
         st.session_state.is_data_harvesting_page = True
     if 'is_warehouse_data_page' not in st.session_state:
         st.session_state.is_warehouse_data_page = False
+    if 'is_migrate_page' not in st.session_state:
+        st.session_state.is_migrate_page = False
     st.sidebar.title("YouTube Data Harvesting with Streamlit")
     
-    if st.sidebar.button("Youtube Data Harvesting"):
+    if st.sidebar.button("Add Channel details to Data lake"):
         st.session_state.is_mysql_data_page = False
         st.session_state.is_data_harvesting_page = True
         st.session_state.is_warehouse_data_page = False
+        st.session_state.is_migrate_page = False
+    if st.sidebar.button("Migrate to SQL"):
+        st.session_state.is_mysql_data_page = False
+        st.session_state.is_data_harvesting_page = False
+        st.session_state.is_warehouse_data_page = False
+        st.session_state.is_migrate_page = True
     if st.sidebar.button("SQL Data Warehouse"):
         st.session_state.is_warehouse_data_page = True
         st.session_state.is_mysql_data_page = False
         st.session_state.is_data_harvesting_page = False
+        st.session_state.is_migrate_page = False
     if st.sidebar.button("Data Analysis With SQL Queries"):
         st.session_state.is_mysql_data_page = True
         st.session_state.is_data_harvesting_page = False
         st.session_state.is_warehouse_data_page = False
-
+        st.session_state.is_migrate_page = False
+        
     if st.session_state.is_mysql_data_page:
         show_mysql_data()
     elif st.session_state.is_data_harvesting_page:
         show_data_harvesting()
     elif st.session_state.is_warehouse_data_page:
         show_warehouse()
+    elif st.session_state.is_migrate_page:
+        show_migrate_page()
+        
+def show_migrate_page():
+    client = pymongo.MongoClient("mongodb://localhost:27017")
+    db = client["youtube_data_harvesting"]
+    collection_name = "channel_details"
+    collection = db[collection_name]
+
+    channel_names = [doc["channel_data"]["channel_Name"] for doc in collection.find({}, {"channel_data.channel_Name": 1})]
+
+
+    st.title("Select a Channel from MongoDB")
+    selected_channel = st.selectbox("Select Channel:", channel_names)
+    if selected_channel:
+        if st.button('Migrate'):
+            with st.spinner('Migrating Data to SQL'):
+                st.write(f"Selected Channel: {selected_channel}")
+                document = collection.find_one({"channel_data.channel_Name": selected_channel})
+                channel_data = document.get("channel_data", {})
+
+                connection = pymysql.connect(
+                    host="localhost",
+                    user="root",
+                    password="",
+                    database="youtube_harvesting"
+                )
+                cursor = connection.cursor()
+                cursor.execute("SELECT * FROM channel WHERE channel_name = %s", (selected_channel,))
+                existing_data = cursor.fetchone()
+
+                if existing_data:
+                    st.error("Data for the selected channel already exists in MySQL.")
+                else:
+                    data_list = []
+
+                    channel_data = document.get("channel_data", {})
+                    video_information = document.get("video_information", [])
+                    comment_data = document.get("comment_data", [])
+
+                    data = {
+                        "channel_data": channel_data,
+                        "video_information": video_information,
+                        "comment_data": comment_data,
+                    }
+                    data_list.append(data)
+                    insert_data_into_phpmyadmin(data_list)
+                    st.success("Data inserted into MySQL successfully!")
+    else:
+        st.warning("Please select a channel.")
         
 def show_warehouse():
     mydb = pymysql.connect(host="localhost",
@@ -330,7 +377,7 @@ def show_warehouse():
         st.table(pd.DataFrame(t_channels, columns=["Video ID", "Video Name","Video Description", "Channel Name", "View Count", "Playlist Id", "Like Count"]).style.set_table_styles([dict(selector="table", props=[("width", f"{table_width}px")])]))
         pass
     elif selected_table == "comments":
-        query_channels = "SELECT channel.channel_name,video.video_name,comment.comment_text,comment.comment_author FROM `comment` INNER JOIN video ON video.video_id = comment.video_id INNER JOIN channel ON channel.channel_id = video.channel_id"
+        query_channels = "SELECT channel.channel_name,video.video_name,comment.comment_text,comment.comment_author FROM `comment` INNER JOIN video ON video.video_id = comment.video_id INNER JOIN channel ON channel.channel_id = video.channel_id LIMIT 200"
         cursor.execute(query_channels)
         mydb.commit()
         t_channels = cursor.fetchall()
@@ -373,7 +420,7 @@ def show_mysql_data():
         mydb.commit()
         t2=cursor.fetchall()
         table_width = 800
-        st.write(pd.DataFrame(t2, columns=["Channel Name","No Of Videos"]).style.set_table_styles([dict(selector="table", props=[("width", f"{table_width}px")])]))
+        st.table(pd.DataFrame(t2, columns=["Channel Name","No Of Videos"]).style.set_table_styles([dict(selector="table", props=[("width", f"{table_width}px")])]))
 
     elif question == '3. 10 most viewed videos':
         query3 = "SELECT channel.channel_name, video.video_name, video.view_count FROM video INNER JOIN channel ON channel.channel_id = video.channel_id WHERE video.view_count is not null ORDER BY video.view_count DESC LIMIT 10;"
